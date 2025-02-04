@@ -1,0 +1,1571 @@
+---
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+  markdown: 
+    wrap: sentence
+---
+
+# Introduction
+
+We aim to determine if there is a difference between biological (bAge) and chronological (cAge) age in Turner syndrome (45,X) and Klinefelter syndrome (47,XXY) compared to euploid controls (46,XX; 46,XY).
+For this, we use the MethylClock and DunedinPACE R-packages as well as the GrimAge calculater.
+
+# Set up environment
+
+```{r}
+
+path = "/path/to/folder/"
+path_data = "/path/to/folder/DATA/"
+path_plots = "/path/to/folder/PLOTS/"
+
+# We load the required packages. 
+library(tidyverse)
+library(methylclock)
+library(ggplot2)
+library(ggpubr)
+library(minfi)
+library(generics)
+library(Hmisc)
+library(emmeans)
+library(DunedinPACE)
+
+col = c("TS" = "#F4A261",
+        "Female" ="#922D50", 
+        "Male" = "#477a8f",
+        "KS" = "#3fc49c")
+
+order <- c("TS","Female","KS","Male")
+
+```
+
+# Load data
+
+We load the following datasets:
+
+-   KS 450K (47,XXY; 46,XY) beta-values
+
+```{r KS 450K data, message=FALSE, warning=FALSE, results = "hide", eval = FALSE}
+
+KS450K <- readRDS(paste0(path,"path/methylation_data.rds")) 
+KS450K_info <- readRDS(paste0(path,"path/clinical_traits.rds"))
+
+# Make sure that samples are in the same order:
+identical(colnames(KS450K),
+          KS450K_info$slide_array)
+
+# If not, use this: 
+KS450K <- KS450K[, KS450K_info$slide_array]
+
+# The order should be correct now:
+identical(colnames(KS450K),
+          KS450K_info$slide_array)
+
+```
+
+-   TS 450K (45,X + mosaics; 46,XX) beta-values
+
+```{r TS 450K data, message=FALSE, warning=FALSE, results = "hide", eval = FALSE}
+TS450K <- readRDS(paste0(path,"path/methylation_data.rds")) 
+TS450K_info <- readRDS(paste0(path,"path/clinical_traits.rds"))
+
+# Make sure that samples are in the same order:
+identical(colnames(TS450K),
+          TS450K_info$ID_new)
+```
+
+We combine the two datasets:
+
+```{r combined data, message=FALSE, warning=FALSE, results = "hide", eval = FALSE}
+CGs_KS450K <- rownames(KS450K)
+CGs_TS450K <- rownames(TS450K)
+
+CGs <- intersect(CGs_KS450K,CGs_TS450K)
+
+M <- cbind(KS450K[CGs,], TS450K[CGs,])
+```
+
+Generate sample info:
+
+```{r message=FALSE, warning=FALSE, results = "hide", eval = FALSE}
+info <- rbind(KS450K_info,S450K_info ) %>% as.data.frame()
+
+identical(colnames(M),
+          info$Sample_Name)
+```
+
+# Run algorithms
+
+## GrimAge
+
+Load GrimAge data:
+
+```{r}
+GrimAge_res <- read_csv(paste0(path_data, "RESULTS/DNAmAgeCalcProject_Results.csv")) %>% 
+  mutate(SID = substr(SID, 2, nchar(SID)))
+GrimAge_dict <- read_csv(paste0(path_data, "RESULTS/DNAmAgeCalcProject_DataDict.csv"))
+```
+
+## Run MethylClock
+
+We run Methylclock with selected clocks.
+
+```{r run, message=FALSE, warning=FALSE, eval=FALSE}
+age <- DNAmAge(M,
+               age=info$age,
+               cell.count=TRUE, 
+               clocks = c("Horvath", "Hannum", "BLUP", "EN", "TL"))
+```
+
+## DunedinPACE
+
+Run DunedinPACE:
+
+```{r message=FALSE, warning=FALSE}
+PACE <- PACEProjector(M) 
+```
+
+## Combined data frames
+
+We make a dataframe from all algorithms.
+
+```{r message=FALSE, warning=FALSE, eval = FALSE}
+
+df <- merge(
+  
+        merge(
+    
+          merge(age, 
+                as.data.frame(PACE) %>% 
+                mutate(id = rownames(.)), 
+                by = "id") %>% 
+            mutate(id = gsub("-",".", id),
+                   id = gsub(" ",".", id)), 
+                                        
+              GrimAge_res %>% select(SID, 
+                                     "Body Mass Index", 
+                                     "Body Fat %", 
+                                     "HDL Cholesterol", 
+                                     "Waist:Hip Ratio", 
+                                     predictedGender, 
+                                     DNAmGrimAge2BasedOnRealAge, 
+                                     DNAmGrimAge2BasedOnPredictedAge, 
+                                     AgeAccelGrim, 
+                                     DNAmPhenoAge, 
+                                     AgeAccelPheno, 
+                                     IEAA, 
+                                     IEAA.Hannum, 
+                                     EEAA, 
+                                     "Epigenetic Age (Zhang)", 
+                                     AgeAccelerationResidual, 
+                                     AgeAccelerationResidualHannum, 
+                                     DNAmAgeHannum, 
+                                     DNAmAge, 
+                                     DNAmAgeSkinBloodClock), 
+              by.x = "id", by.y = "SID"),
+        
+            info %>% select(-age) %>% 
+              mutate(Sample_Name = gsub("-",".", Sample_Name),
+                     Sample_Name = gsub(" ",".", Sample_Name)), 
+        by.x = "id", by.y = "Sample_Name") %>% 
+  rename("age" = "cAge")
+
+```
+
+## Save data
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+save(age, 
+     PACE, 
+     df, 
+     file = paste0(path_data,"age_predictions.Rdata"))
+```
+
+# Data analysis
+
+## Figure 1
+
+Set data frames for DNAmAge and AgeAcc:
+
+```{r}
+age_df <- df %>% select("BLUP", "EN", "Hannum", "Horvath", group, cohort, cAge)
+
+# Set data frame for TS cohort
+DNAmAge_TS <- age_df %>% 
+  filter(cohort == "TS cohort") 
+
+DNAmAge_mean_TS <- age_df %>% 
+  filter(cohort == "TS cohort")  %>% 
+  mutate(DNAmAge = rowMeans(select(DNAmAge_TS, BLUP, EN, Hannum, Horvath))) %>% 
+  select(DNAmAge, cAge, group)
+
+# Set data frame for KS cohort
+DNAmAge_KS <- age_df %>% 
+                filter(cohort == "KS cohort") 
+
+DNAmAge_mean_KS <- age_df %>% 
+  filter(cohort == "KS cohort")  %>% 
+  mutate(DNAmAge = rowMeans(select(DNAmAge_KS, BLUP, EN, Hannum, Horvath))) %>% 
+  select(DNAmAge, cAge, group)
+```
+
+```{r}
+acc_df <- df %>% select(colnames(df)[grepl("ageAcc", colnames(df))],
+                        cAge, group, cohort) %>% 
+  pivot_longer(cols = colnames(df)[grepl("ageAcc", colnames(df))]) %>% 
+  mutate(accType = sub("\\..*", "", name),
+         Algorithm = sub(".*\\.", "", name))
+
+acc_df_mean <- df %>% 
+  mutate(ageAcc = rowMeans(select(df,ageAcc.BLUP, ageAcc.EN, ageAcc.Hannum, ageAcc.Horvath)),
+         ageAcc2 = rowMeans(select(df,ageAcc2.BLUP, ageAcc2.EN, ageAcc2.Hannum, ageAcc2.Horvath)),
+         ageAcc3 = rowMeans(select(df,ageAcc3.BLUP, ageAcc3.EN, ageAcc3.Hannum, ageAcc3.Horvath))) %>% 
+  select(ageAcc, ageAcc2, ageAcc3, cohort, group)
+```
+
+### DNAmAge
+
+```{r}
+# Test on means across the four clocks 
+emm <- emmeans(lm(DNAmAge ~ cAge + group, data=DNAmAge_mean_TS), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,
+      DNAmAge_mean_TS) %>% 
+ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = DNAmAge, fill = group, col = group), 
+              width = .4,alpha = .4) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 80, 
+                label = paste("p =",round(p.value, digits = 4)), size = 3, 
+            vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "DNAmAge") +
+  ylim(15,85) -> DNAmAge_mean_p_TS
+
+summary(lm(DNAmAge ~ cAge * factor(group, levels = c("Female","TS")), 
+           data = DNAmAge_mean_TS)) %>% coef()
+
+DNAmAge_mean_TS %>% 
+  ggplot(aes(cAge, DNAmAge, color = factor(group, levels = order), fill = factor(group, levels = order))) +
+  geom_abline(slope = 1, color = "grey80", linetype = "dashed") + 
+  geom_point(alpha = .4) +
+  geom_line(stat="smooth",method = "lm", alpha = 1, linewidth = .75) +
+  theme_bw()+
+  theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "cAge", y = "DNAmAge") +
+  ylim(15,85) -> DNAmAge_mean_p_TS2
+
+```
+
+```{r}
+# Test on means across the four clocks 
+emm <- emmeans(lm(DNAmAge ~ cAge + group, data=DNAmAge_mean_KS), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,
+      DNAmAge_mean_KS) %>% 
+ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = DNAmAge, fill = group, col = group), 
+              width = .4,alpha = .4) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 70, 
+                label = paste("p =",round(p.value, digits = 3)), size = 3, 
+            vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "DNAmAge") +
+  ylim(15,75) -> DNAmAge_mean_p_KS
+
+summary(lm(DNAmAge ~ cAge * factor(group, levels = c("Male","KS")), 
+           data = DNAmAge_mean_KS)) %>% coef()
+
+DNAmAge_mean_KS %>% 
+  ggplot(aes(cAge, DNAmAge, color = factor(group, levels = order), fill = factor(group, levels = order))) +
+  geom_abline(slope = 1, color = "grey80", linetype = "dashed") + 
+  geom_point(alpha = .4) +
+  geom_line(stat="smooth",method = "lm", alpha = 1, linewidth = .75) +
+  theme_bw()+
+  theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "cAge", y = "DNAmAge") +
+  ylim(15,75) -> DNAmAge_mean_p_KS2
+```
+
+### Acceleration
+
+```{r}
+
+#TS
+emm <- emmeans(lm(ageAcc ~ group, data=acc_df_mean %>% filter(cohort == "TS cohort")), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,acc_df_mean %>% filter(cohort == "TS cohort")) %>% 
+ggplot(aes(group, ageAcc, color = group, fill = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey80")+
+  geom_point(alpha = .4, position = position_jitter(width = .35)) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(p.value, 2)), size = 3, 
+            vjust = -0.5, color = "black") +
+  theme_bw() + theme(legend.position = "none",
+                     plot.title = element_text(hjust = .5))+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "Acceleration (years)", title = "ageAcc") +
+  ylim(-8,17) -> TSa1
+
+emm <- emmeans(lm(ageAcc2 ~ group, data=acc_df_mean %>% filter(cohort == "TS cohort")), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,acc_df_mean %>% filter(cohort == "TS cohort")) %>% 
+ggplot(aes(group, ageAcc2, color = group, fill = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey80")+
+  geom_point(alpha = .4, position = position_jitter(width = .35)) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(p.value, 2)), size = 3, 
+            vjust = -0.5, color = "black") +
+  theme_bw() + theme(legend.position = "none",
+                     plot.title = element_text(hjust = .5))+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "Acceleration (years)", title = "ageAcc2") +
+  ylim(-8,17) -> TSa2
+
+emm <- emmeans(lm(ageAcc3 ~ group, data=acc_df_mean %>% filter(cohort == "TS cohort")), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,acc_df_mean %>% filter(cohort == "TS cohort")) %>% 
+ggplot(aes(group, ageAcc3, color = group, fill = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey80")+
+  geom_point(alpha = .4, position = position_jitter(width = .35)) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(p.value, 2)), size = 3, 
+            vjust = -0.5, color = "black") +
+  theme_bw() + theme(legend.position = "none",
+                     plot.title = element_text(hjust = .5))+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "Acceleration (years)", title = "ageAcc3") +
+  ylim(-8,17) -> TSa3
+
+# KS
+emm <- emmeans(lm(ageAcc ~ group, data=acc_df_mean %>% filter(cohort == "KS cohort")), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,acc_df_mean %>% filter(cohort == "KS cohort")) %>% 
+ggplot(aes(group, ageAcc, color = group, fill = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey80")+
+  geom_point(alpha = .4, position = position_jitter(width = .35)) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(p.value, 2)), size = 3, 
+            vjust = -0.5, color = "black") +
+  theme_bw() + theme(legend.position = "none",
+                     plot.title = element_text(hjust = .5))+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "Acceleration (years)", title = "ageAcc") +
+  ylim(-8,17) -> KSa1
+
+emm <- emmeans(lm(ageAcc2 ~ group, data=acc_df_mean %>% filter(cohort == "KS cohort")), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,acc_df_mean %>% filter(cohort == "KS cohort")) %>% 
+ggplot(aes(group, ageAcc2, color = group, fill = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey80")+
+  geom_point(alpha = .4, position = position_jitter(width = .35)) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(p.value, 2)), size = 3, 
+            vjust = -0.5, color = "black") +
+  theme_bw() + theme(legend.position = "none",
+                     plot.title = element_text(hjust = .5))+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "Acceleration (years)", title = "ageAcc2") +
+  ylim(-8,17) -> KSa2
+
+emm <- emmeans(lm(ageAcc3 ~ group, data=acc_df_mean %>% filter(cohort == "KS cohort")), pairwise ~ group)
+p.value <- as.data.frame(emm$contrasts)$p.value
+
+merge(emm$emmeans,acc_df_mean %>% filter(cohort == "KS cohort")) %>% 
+ggplot(aes(group, ageAcc3, color = group, fill = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey80")+
+  geom_point(alpha = .4, position = position_jitter(width = .35)) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(p.value, 2)), size = 3, 
+            vjust = -0.5, color = "black") +
+  theme_bw() + theme(legend.position = "none",
+                     plot.title = element_text(hjust = .5))+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "Acceleration (years)", title = "ageAcc3") +
+  ylim(-8,17) -> KSa3
+
+
+```
+
+```{r}
+
+ggarrange(
+  
+  ggarrange(DNAmAge_mean_p_TS,
+          DNAmAge_mean_p_TS2,
+          DNAmAge_mean_p_KS,
+          DNAmAge_mean_p_KS2,
+          ncol = 4,
+          labels = LETTERS[2:5],
+          widths = c(1,1.5,1,1.5)),
+  
+  ggarrange(TSa1, 
+          TSa2, 
+          TSa3, 
+          KSa1, 
+          KSa2, 
+          KSa3, 
+          ncol = 6, labels = LETTERS[6:11]),
+  
+  ncol = 1, nrow = 2
+) -> F1
+F1
+
+ggsave(F1, file = paste0(path_plots, "F1.pdf"),
+                         width = 10, height = 6.25)
+
+```
+
+## Figure 2
+
+```{r}
+pheno_df <- df %>% 
+  select(DNAmPhenoAge, AgeAccelPheno, cAge, group, cohort) %>% 
+  rename("AgeAccelPheno" = "ageAccPheno")
+
+grim_df <- df %>% 
+  select(DNAmGrimAge2BasedOnRealAge, AgeAccelGrim, cAge, group, cohort) %>% 
+  rename("DNAmGrimAge2BasedOnRealAge" = "DNAmGrimAge","AgeAccelGrim" = "ageAccGrim")
+
+pace_df <- df %>% 
+  select(DunedinPACE, cAge, group, cohort)
+
+TL_df <- df %>% 
+  select(TL, cAge, group, cohort)
+```
+
+### PhenoAge
+
+```{r}
+emm <- emmeans(lm(DNAmPhenoAge ~ cAge + group, data = pheno_df %>% filter(cohort == "TS cohort")), ~ group)
+merge(
+  pheno_df %>% filter(cohort == "TS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = DNAmPhenoAge,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 65, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "") +
+  ylim(-5,70)-> phenoTS_p1
+
+pheno_df %>% 
+  filter(cohort == "TS cohort") %>% 
+  ggplot(aes(cAge, DNAmPhenoAge, color = factor(group, levels = order))) +
+  geom_point(alpha = .35) +
+  geom_smooth(method = "lm", se = F) + 
+  theme_bw()+theme(legend.position = "none") + 
+  scale_color_manual(values = col) + 
+  labs(x = "cAge")+
+  ylim(-5,70) -> phenoTS_p2
+```
+
+```{r}
+emm <- emmeans(lm(DNAmPhenoAge ~ cAge + group, data = pheno_df %>% filter(cohort == "KS cohort")), ~ group)
+merge(
+  pheno_df %>% filter(cohort == "KS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = DNAmPhenoAge,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 65, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "") +
+  ylim(-5,70)-> phenoKS_p1
+
+pheno_df %>% 
+  filter(cohort == "KS cohort") %>% 
+  ggplot(aes(cAge, DNAmPhenoAge, color = factor(group, levels = order))) +
+  geom_point(alpha = .35) +
+  geom_smooth(method = "lm", se = F) + 
+  theme_bw()+theme(legend.position = "none") + 
+  scale_color_manual(values = col) + 
+  labs(x = "cAge") +
+  ylim(-5,70)-> phenoKS_p2
+```
+
+```{r}
+
+emm <- emmeans(lm(ageAccPheno ~ group, data = pheno_df %>% filter(cohort == "TS cohort")), ~ group)
+merge(
+  pheno_df %>% filter(cohort == "TS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey80") + 
+  geom_jitter(aes(x = factor(group, levels = order), y = ageAccPheno,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 20, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "") +
+  ylim(-32,25)-> phenoTS_p3
+
+emm <- emmeans(lm(ageAccPheno ~ group, data = pheno_df %>% filter(cohort == "KS cohort")), ~ group)
+merge(
+  pheno_df %>% filter(cohort == "KS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey80") + 
+  geom_jitter(aes(x = factor(group, levels = order), y = ageAccPheno,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 20, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "") +
+  ylim(-32,25) -> phenoKS_p3
+```
+
+### GrimAge
+
+```{r}
+emm <- emmeans(lm(DNAmGrimAge ~ cAge + group, data = grim_df %>% filter(cohort == "TS cohort")), ~ group)
+merge(
+  grim_df %>% filter(cohort == "TS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = DNAmGrimAge,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 80, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "") +
+  ylim(25,85)-> grimTS_p1
+
+grim_df %>% 
+  filter(cohort == "TS cohort") %>% 
+  ggplot(aes(cAge, DNAmGrimAge, color = factor(group, levels = order))) +
+  geom_point(alpha = .35) +
+  geom_smooth(method = "lm", se = F) + 
+  theme_bw()+theme(legend.position = "none") + 
+  scale_color_manual(values = col) + 
+  labs(x = "cAge")+
+  ylim(25,85) -> grimTS_p2
+```
+
+```{r}
+emm <- emmeans(lm(DNAmGrimAge ~ cAge + group, data = grim_df %>% filter(cohort == "KS cohort")), ~ group)
+merge(
+  grim_df %>% filter(cohort == "KS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = DNAmGrimAge,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 80, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "") +
+  ylim(25,85)-> grimKS_p1
+
+grim_df %>% 
+  filter(cohort == "KS cohort") %>% 
+  ggplot(aes(cAge, DNAmGrimAge, color = factor(group, levels = order))) +
+  geom_point(alpha = .35) +
+  geom_smooth(method = "lm", se = F) + 
+  theme_bw()+theme(legend.position = "none") + 
+  scale_color_manual(values = col) + 
+  labs(x = "cAge") +
+  ylim(25,85)-> grimKS_p2
+```
+
+```{r}
+
+emm <- emmeans(lm(ageAccGrim ~ group, data = grim_df %>% filter(cohort == "TS cohort")), ~ group)
+merge(
+  grim_df %>% filter(cohort == "TS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey80") + 
+  geom_jitter(aes(x = factor(group, levels = order), y = ageAccGrim,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "")  +
+  ylim(-10,16)-> grimTS_p3
+
+emm <- emmeans(lm(ageAccGrim ~ group, data = grim_df %>% filter(cohort == "KS cohort")), ~ group)
+merge(
+  grim_df %>% filter(cohort == "KS cohort"),
+  as.data.frame(emm),
+  by = "group") %>% 
+ggplot() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey80") + 
+  geom_jitter(aes(x = factor(group, levels = order), y = ageAccGrim,fill = group, col = group), width = .4, alpha = .4) +
+   geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = .5, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 15, label = paste("p =", signif(summary(contrast(emm, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "") +
+  ylim(-10,16)-> grimKS_p3
+```
+
+```{r}
+
+ggarrange(
+  
+  ggarrange(phenoTS_p1,phenoTS_p2,
+            phenoKS_p1,phenoKS_p2,
+          ncol = 4, nrow = 1, widths = c(1,1.5,1,1.5),
+          labels = c("A","C","E","G")),
+  
+  ggarrange(grimTS_p1,grimTS_p2,
+            grimKS_p1,grimKS_p2,
+          ncol = 4, nrow = 1, widths = c(1,1.5,1,1.5),
+          labels = c("B","D","F","H")),
+  
+  ggarrange(phenoTS_p3,phenoKS_p3,
+          grimTS_p3,grimKS_p3,NA,
+          ncol = 5, nrow = 1,
+          labels = c("I","J","K","L",NA)),
+  
+  ncol = 1, nrow = 3
+) -> F2
+F2
+
+ggsave(F2, file = paste0(path_plots, "F2.pdf"),
+       width = 10, height = 9.375)
+
+```
+
+## Figure 3
+
+### DNAmTL
+
+```{r TL KS 450K, message=FALSE, warning=FALSE, fig.height=3, fig.width=3}
+
+# Make model for each cohort and calculate EM-means:
+emm_TL_TS <- emmeans(lm(TL ~ cAge + group,  data = TL_df %>% filter(cohort == "TS cohort") ),~ group)
+merge(TL_df,
+      as.data.frame(emm_TL_TS) %>%                  # Make combined data frame and add p-values
+        mutate(p_value = summary(contrast(emm_TL_TS, method = "pairwise"))$p.value),
+      by = "group") %>% 
+  ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = TL,fill = group, col = group), 
+              width = .35, alpha = .4) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 8,label = paste("p =", signif(summary(contrast(emm_TL_TS, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  ylim(6.25,8.25) +
+  labs(x = "", y = "Telomere Length (kb)") -> TL_p_TS
+
+TL_df %>% 
+  filter(cohort == "TS cohort") %>% 
+  ggplot(aes(cAge, TL, color = factor(group, levels = order))) +
+  geom_point(alpha = .35) +
+  geom_smooth(method = "lm", se = F) + 
+  theme_bw()+theme(legend.position = "none") + 
+  scale_color_manual(values = col) + 
+  ylim(6.25,8.25) +
+  labs(x = "cAge", y = "Telomere Length (kb)") -> TL_p_lm_TS
+
+```
+
+```{r}
+emm_TL_KS <- emmeans(lm(TL ~ cAge + group, data = TL_df %>% filter(cohort == "KS cohort") ), ~ group)
+merge(TL_df,
+      as.data.frame(emm_TL_KS) %>%                  # Make combined data frame and add p-values
+        mutate(p_value = summary(contrast(emm_TL_KS, method = "pairwise"))$p.value),
+      by = "group") %>% 
+  ggplot() +
+  geom_jitter(aes(x = factor(group, levels = order), y = TL, fill = group, col = group), 
+              width = .35, alpha = .4) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 8,label = paste("p =", signif(summary(contrast(emm_TL_KS, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  ylim(6.25,8.25) +
+  labs(x = "", y = "Telomere Length (kb)")  -> TL_p_KS
+
+
+TL_df %>% 
+  filter(cohort == "KS cohort") %>% 
+  ggplot(aes(cAge, TL, color = factor(group, levels = order))) +
+  geom_point(alpha = .35) +
+  geom_smooth(method = "lm", se = F) + 
+  theme_bw()+theme(legend.position = "none") + 
+  scale_color_manual(values = col) + 
+  ylim(6.25,8.25) +
+  labs(x = "cAge", y = "Telomere Length (kb)") -> TL_p_lm_KS
+```
+
+### DunedinPACE
+
+```{r message=FALSE, warning=FALSE, fig.height=4, fig.width=4}
+
+emm_pace_TS <- emmeans(lm(DunedinPACE ~ group, data = pace_df %>% filter(cohort == "TS cohort") ), ~ group)
+merge(pace_df,as.data.frame(emm_pace_TS),by = "group") %>% 
+  ggplot() +
+  geom_hline(yintercept = 1, color = "grey80", linetype = "dashed") +
+  geom_jitter(aes(x = factor(group, levels = order), y = DunedinPACE, fill = group, col = group), 
+              width = .35, alpha = .4) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 1.4,label = paste("p =", signif(summary(contrast(emm_pace_TS, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "DunedinPACE") +
+  ylim(0.5,1.5) -> PACE_p_TS
+
+emm_pace_KS <- emmeans(lm(DunedinPACE ~ group, data = pace_df %>% filter(cohort == "KS cohort") ), ~ group)
+merge(pace_df,as.data.frame(emm_pace_KS),by = "group") %>% 
+  ggplot() +
+  geom_hline(yintercept = 1, color = "grey80", linetype = "dashed") +
+  geom_jitter(aes(x = factor(group, levels = order), y = DunedinPACE, fill = group, col = group), 
+              width = .35, alpha = .4) +
+  geom_errorbar(aes(x = group, y = emmean, ymin = lower.CL, ymax = upper.CL), 
+               stat = "identity", width = .35, color = "black") +
+    geom_point(aes(x = group, y = emmean, fill = group),
+             size = 2, alpha = 1, shape = 21, color = "black") + 
+  annotate("text", x = 1.5, y = 1.4,label = paste("p =", signif(summary(contrast(emm_pace_KS, method = "pairwise"))$p.value, 2)), size = 3, vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) +
+  labs(x = "", y = "DunedinPACE") +
+  ylim(0.5,1.5) -> PACE_p_KS
+
+
+pace_df %>%  
+  filter(cohort == "TS cohort") %>% 
+  ggplot(aes(cAge, DunedinPACE, color = group, fill = group)) +
+  geom_hline(yintercept = 1, color = "grey80", linetype = "dashed") +
+  geom_point(alpha = .4) +
+  geom_smooth(method = "lm", se = F, linewidth = .75) +
+  theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
+                     legend.position = "none") +
+  labs(x = "cAge", y = "DunedinPACE") + 
+  ylim(0.5,1.5)+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) -> PACE_p_lm_TS
+
+pace_df %>%  
+  filter(cohort == "KS cohort") %>% 
+  ggplot(aes(cAge, DunedinPACE, color = group, fill = group)) +
+  geom_hline(yintercept = 1, color = "grey80", linetype = "dashed") +
+  geom_point(alpha = .4) +
+  geom_smooth(method = "lm", se = F, linewidth = .75) +
+  theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
+                     legend.position = "none") +
+  labs(x = "cAge", y = "DunedinPACE") + 
+  ylim(0.5,1.5)+
+  scale_color_manual(values = col) + 
+  scale_fill_manual(values = col) -> PACE_p_lm_KS
+```
+
+## Clin
+
+```{r}
+
+CLIN_TS <- readRDS("/path/clinical_traits.rds") %>% mutate("Waist:Hip-ratio" = (`Waist (cm)`/`Hip (cm)`))
+CLIN_KS <- readRDS("/path/KS_clinical.rds")
+
+df_mean <- df %>% 
+  mutate(DNAmAge = rowMeans(select(df, BLUP, EN, Hannum, Horvath)),
+         ageAcc = rowMeans(select(df, ageAcc.BLUP, ageAcc.EN, ageAcc.Hannum, ageAcc.Horvath)),
+         ageAcc2 = rowMeans(select(df, ageAcc2.BLUP, ageAcc2.EN, ageAcc2.Hannum, ageAcc2.Horvath)),
+         ageAcc3 = rowMeans(select(df, ageAcc3.BLUP, ageAcc3.EN, ageAcc3.Hannum, ageAcc3.Horvath))) 
+
+vars2 = c("cAge",
+         "DNAmAge",
+         "PhenoAge","GrimAge",
+         "DNAmTL","DunedinPACE", 
+         "ageAcc",
+         "ageAcc2",
+         "ageAcc3",
+        "ageAccPheno","ageAccGrim")
+
+traits_df_TS = data.frame(
+  traits = c(# Body composition
+           "Weight (kg)",
+           "BMI (kg/m2)",
+           "Hip (cm)",
+           "Waist (cm)",
+           "Waist-Hip-ratio",
+           
+           #Cardiovasculature
+           "Systolic 24h (mmHg)",
+           "Diastolic 24h (mmHg)",
+           "TotalPlaque",
+           "ECG-QTc (ms)",
+           "Left ventricular mass (g)",
+           "Ejection fraction %",
+           "E/A ratio",
+           
+           # Lipids
+           "HDL cholesterol (mmol/l)",
+           "Triglycerides (mmol/l)",
+           "Total cholesterol (mmol/l)",
+           
+           # Biochemistry
+           "Hemoglobin (mmol/l)",
+           "Creatinine (µmol/l)",
+           "HbA1c (mmol/mol)"),
+  
+  trait_groups = c(rep("Body composition",5),
+                 rep("Cardiovasculature", 7),
+                 rep("Lipids",3),
+                 rep("Biochemistry",3)))
+  
+```
+
+```{r}
+merge(
+  merge(
+    df_mean %>% 
+      rename(TL = "DNAmTL",
+             DNAmGrimAge2BasedOnRealAge = "GrimAge",
+             AgeAccelGrim = "ageAccGrim",
+             DNAmPhenoAge = "PhenoAge",
+             AgeAccelPheno = "ageAccPheno") %>% 
+      filter(cohort == "TS cohort") %>% 
+      select(vars2, id, group, cAge) %>% 
+      pivot_longer(-c(id, group), names_to = "Algorithm", values_to = "value"),
+    TS450K_info %>% select(ID_new, somaseq) %>% 
+            mutate(ID_new = gsub("-",".", ID_new),
+                   ID_new = gsub(" ",".", ID_new)),
+    by.x = "id", by.y = "ID_new"),
+  CLIN,
+  by.x = "somaseq", by.y = "somaseq_id") %>% 
+  select(group.x, Algorithm, value, traits_df$traits) -> CLIN_df_M_mean
+
+```
+
+```{r}
+cor_df_TS_m <- CLIN_df_M_mean %>% 
+  filter(group.x == "TS") %>% 
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  select(-group.x) %>%
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_TS_m <- cor_df_TS_m[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% vars2) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_TS_m <- cor_df_TS_m[[3]] %>% 
+  as.data.frame() %>% 
+  filter(row.names(.) %in% vars2) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+order_cor_TS_m <- unique((r_TS_m %>%  
+                  filter(algorithms == "cAge") %>% 
+                  arrange(value))$name )
+
+cor_df_F_m <- CLIN_df_M_mean %>% 
+    filter(group.x == "Female") %>% 
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  select(-group.x) %>%
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_F_m <- cor_df_F_m[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% vars2) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_F_m <- cor_df_F_m[[3]] %>% as.data.frame() %>% 
+  filter(row.names(.) %in% vars2) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+cor_r_p_m <- rbind(
+  r_TS_m %>% mutate(p = p_TS_m$value,
+                  p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "TS"),
+  
+  r_F_m %>% mutate(p = p_F_m$value,
+                 p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "Female")) 
+  
+merge(cor_r_p_m,
+      traits_df,
+      by.x = "name",
+      by.y = "traits") %>% 
+ggplot(aes(factor(name, levels = traits_df$traits), 
+           factor(algorithms, levels = vars2), 
+           fill = value)) + 
+  geom_tile() + 
+  geom_text(aes(label = paste(round(value, digits = 2),
+                              "\n",
+                              ifelse(p < 0.001, "<0.001",round(p, digits = 3))), color = p_), size = 1.5) + 
+  scale_color_manual(values = c("grey","black")) + 
+  facet_grid(rows = vars(factor(group, levels = c("TS", "Female"))),
+             cols = vars(trait_groups),
+             scales = "free",
+             space = "free") +
+  theme_bw() +
+  scale_fill_gradient2(mid = "white", high = col[1], low = col[2]) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
+        legend.position = "right") +
+  labs(x = "", y = "", title = "") -> cor_p_TS_mean
+cor_p_TS_mean
+```
+
+```{r}
+
+traits_KS_df = data.frame(
+  traits = c(# Body composition
+           "Weight (kg)",
+           "BMI (kg/m2)",
+           "Hip (cm)",
+           "Waist (cm)",
+           "Waist-Hip-Ratio",
+           "Body Fat %", 
+           
+           # Lipids
+           "HDL cholesterol (mmol/l)",
+           "Triglycerides (mmol/l)",
+           "Total cholesterol (mmol/l)"),
+  
+  trait_groups = c(rep("Body composition",6),
+                 rep("Lipids",3)))
+merge(
+  merge(
+    df_mean %>% 
+      rename(TL = "DNAmTL",
+        DNAmGrimAge2BasedOnRealAge = "GrimAge",
+        AgeAccelGrim = "ageAccGrim",
+        DNAmPhenoAge = "PhenoAge",
+        AgeAccelPheno = "ageAccPheno") %>% 
+      filter(cohort == "KS cohort") %>% 
+      select(vars2, id, group, cAge) %>% 
+      pivot_longer(-c(id, group), names_to = "Algorithm", values_to = "value"),
+  KS450K_info %>% select(unique_id, slide_array),
+  by.x = "id", by.y = "slide_array"),
+  CLIN_KS, by = "unique_id") %>% 
+  select(-c(Diagnosis_Age, Treatment_start_age, Testis_vol)) %>% 
+  rename("Weight" = "Weight (kg)",
+          "BMI"="BMI (kg/m2)",
+          "Hip"="Hip (cm)" ,
+          "Waist"="Waist (cm)",
+          "Waist_Hip_Ratio" ="Waist-Hip-Ratio",
+          "HDL" ="HDL cholesterol (mmol/l)",
+          "Triglycerides" ="Triglycerides (mmol/l)",
+          "Total_cholesterol"= "Total cholesterol (mmol/l)",
+          "hemoglobin"="Hemoglobin (mmol/l)",
+         "Body_fat_percentage" = "Body Fat %")  -> CLIN_df_M_KS_mean
+```
+
+```{r}
+cor_df_KS <- CLIN_df_M_KS_mean %>% 
+  filter(group == "KS") %>% 
+  select(-c(id, group, unique_id, Group, Karyotype, Treatment, Age)) %>%
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_KS <- cor_df_KS[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars2, "cAge")) %>% 
+    select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_KS <- cor_df_KS[[3]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars2, "cAge")) %>% 
+  select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+order_cor_KS <- unique((r_KS %>%  
+                  filter(algorithms == "cAge") %>% 
+                  arrange(value))$name )
+
+cor_df_M <- CLIN_df_M_KS_mean %>% 
+  filter(group == "Male") %>% 
+  select(-c(id, group, unique_id, Group, Karyotype, Treatment, Age)) %>%
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_M <- cor_df_M[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars2, "cAge")) %>% 
+  select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_M <- cor_df_M[[3]] %>% 
+  as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars2, "cAge")) %>% 
+  select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+cor_r_p_KScohort <- merge(
+  rbind(
+  r_KS %>% mutate(p = p_KS$value,
+                  p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "KS"),
+  
+  r_M %>% mutate(p = p_M$value,
+                 p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "Male")),
+  traits_KS_df,
+  by.x = "name", by.y = "traits")
+  
+cor_r_p_KScohort %>% 
+ggplot(aes(factor(name, levels = traits_KS_df$traits),
+           factor(algorithms, levels = c(vars2)),
+           fill = value)) + 
+  geom_tile() + 
+  geom_text(aes(label = paste(round(value, digits = 2),
+                            "\n",
+                            ifelse(p < 0.001, "<0.001",round(p, digits = 3))), color = p_), size = 1.5) + 
+  scale_color_manual(values = c("grey","black")) + 
+  facet_grid(rows = vars(factor(group, levels = c("KS","Male"))),
+             cols = vars(trait_groups),
+             scales = "free",
+             space = "free") +
+  theme_bw() +
+  scale_fill_gradient2(mid = "white", high = col[4], low = col[3]) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
+        legend.position = "right") +
+  labs(x = "", y = "", title = "") -> cor_p_KS_mean
+cor_p_KS_mean
+
+```
+
+```{r}
+
+ggarrange(
+  
+   ggarrange(PACE_p_TS, PACE_p_lm_TS, 
+          PACE_p_KS, PACE_p_lm_KS,
+          TL_p_TS, TL_p_lm_TS, 
+          TL_p_KS,TL_p_lm_KS,
+          ncol = 4, nrow = 2, widths = c(1,1.5,1,1.5),
+          labels = LETTERS[1:8]),
+   
+   ggarrange(cor_p_TS_mean,
+             cor_p_KS_mean,
+             widths = c(1.75,1.25),
+             labels = LETTERS[9:10],
+             ncol = 2, nrow = 1),
+   
+   ncol = 1, nrow = 2
+) -> F3
+F3
+
+ggsave(F3, file = paste0(path_plots, "F3.pdf"),
+       width = 10,
+       height = 12.5)
+```
+
+## Figure S1
+
+```{r}
+vars = c("cAge",
+         "BLUP","EN","Hannum","Horvath",
+         "PhenoAge","GrimAge",
+         "DNAmTL","DunedinPACE", 
+         "ageAcc.BLUP","ageAcc2.BLUP","ageAcc3.BLUP",
+         "ageAcc.EN","ageAcc2.EN","ageAcc3.EN",
+         "ageAcc.Hannum","ageAcc2.Hannum","ageAcc3.Hannum",
+         "ageAcc.Horvath","ageAcc2.Horvath","ageAcc3.Horvath",
+        "ageAccPheno","ageAccGrim")
+
+merge(
+  merge(
+    df %>% 
+      rename(TL = "DNAmTL",
+             DNAmGrimAge2BasedOnRealAge = "GrimAge",
+             AgeAccelGrim = "ageAccGrim",
+             DNAmPhenoAge = "PhenoAge",
+             AgeAccelPheno = "ageAccPheno") %>% 
+      filter(cohort == "TS cohort") %>% 
+      select(vars, id, group, cAge) %>% 
+      pivot_longer(-c(id, group), names_to = "Algorithm", values_to = "value"),
+    TS450K_info %>% select(ID_new, somaseq) %>% 
+            mutate(ID_new = gsub("-",".", ID_new),
+                   ID_new = gsub(" ",".", ID_new)),
+    by.x = "id", by.y = "ID_new"),
+  CLIN_TS,
+  by.x = "somaseq", by.y = "somaseq_id") %>% 
+  rename("Waist:Hip-ratio" = "Waist-Hip-ratio")%>% 
+  select(group.x, Algorithm, value, traits_df_TS$traits, id)  -> CLIN_df_M_TS
+
+# We construct a correlation matrix for the TS group:
+
+cor_df_TS_m <- CLIN_df_M %>% 
+  filter(!(Algorithm %in% c("Body Mass Index", "Body Fat %", "HDL Cholesterol", "Waist:Hip Ratio")),
+         group.x == "TS") %>% 
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  select(-group.x) %>%
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_TS_m <- cor_df_TS_m[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% vars) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_TS_m <- cor_df_TS_m[[3]] %>% 
+  as.data.frame() %>% 
+  filter(row.names(.) %in% vars) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+order_cor_TS_m <- unique((r_TS_m %>%  
+                  filter(algorithms == "cAge") %>% 
+                  arrange(value))$name )
+
+cor_df_F_m <- CLIN_df_M %>% 
+    filter(!(Algorithm %in% c("Body Mass Index", "Body Fat %", "HDL Cholesterol", "Waist:Hip Ratio")),
+           group.x == "Female") %>% 
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  select(-group.x) %>%
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_F_m <- cor_df_F_m[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% vars) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_F_m <- cor_df_F_m[[3]] %>% as.data.frame() %>% 
+  filter(row.names(.) %in% vars) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+cor_r_p_m <- rbind(
+  r_TS_m %>% mutate(p = p_TS_m$value,
+                  p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "TS"),
+  
+  r_F_m %>% mutate(p = p_F_m$value,
+                 p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "Female")) 
+  
+merge(cor_r_p_m,
+      traits_df,
+      by.x = "name",
+      by.y = "traits") %>% 
+ggplot(aes(factor(name, levels = order_cor_TS_m), 
+           factor(algorithms, levels = vars), 
+           fill = value)) + 
+  geom_tile() + 
+  geom_text(aes(label = ifelse(p < 0.001, "<0.001",round(p, digits = 3)), color = p_), size = 1.5) + 
+  scale_color_manual(values = c("grey","black")) + 
+  facet_grid(rows = vars(factor(group, levels = c("TS", "Female"))),
+             cols = vars(trait_groups),
+             scales = "free",
+             space = "free") +
+  theme_bw() +
+  scale_fill_gradient2(mid = "white", high = col[1], low = col[2]) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
+        legend.position = "right") +
+  labs(x = "", y = "", title = "") -> cor_p_TS
+cor_p_TS
+```
+
+```{r}
+merge(
+  merge(
+    df %>% 
+      rename(TL = "DNAmTL",
+        DNAmGrimAge2BasedOnRealAge = "GrimAge",
+        AgeAccelGrim = "ageAccGrim",
+        DNAmPhenoAge = "PhenoAge",
+        AgeAccelPheno = "ageAccPheno") %>% 
+      filter(cohort == "KS cohort") %>% 
+      select(vars, id, group, cAge, "Body Mass Index", "Body Fat %", "HDL Cholesterol", "Waist:Hip Ratio") %>% 
+      pivot_longer(-c(id, group), names_to = "Algorithm", values_to = "value"),
+  KS450K_info %>% select(unique_id, slide_array),
+  by.x = "id", by.y = "slide_array"),
+  CLIN_KS, by = "unique_id") %>% 
+  select(-c(Diagnosis_Age, Treatment_start_age, Testis_vol)) %>% 
+  rename("Weight" = "Weight (kg)",
+          "BMI"="BMI (kg/m2)",
+          "Hip"="Hip (cm)" ,
+          "Waist"="Waist (cm)",
+          "Waist_Hip_Ratio" ="Waist-Hip-Ratio",
+          "HDL" ="HDL cholesterol (mmol/l)",
+          "Triglycerides" ="Triglycerides (mmol/l)",
+          "Total_cholesterol"= "Total cholesterol (mmol/l)",
+          "hemoglobin"="Hemoglobin (mmol/l)") -> CLIN_df_M_KS
+
+traits_KS_df = data.frame(
+  traits = c(# Body composition
+           "Weight (kg)",
+           "BMI (kg/m2)",
+           "Hip (cm)",
+           "Waist (cm)",
+           "Waist-Hip-Ratio",
+           "Body_fat_percentage",
+           
+           # Triglycerides
+           "HDL cholesterol (mmol/l)",
+           "Triglycerides (mmol/l)",
+           "Total cholesterol (mmol/l)",
+           
+           # Biochemistry
+           "Hemoglobin (mmol/l)"),
+  
+  trait_groups = c(rep("Body composition",6),
+                 rep("Triglycerides",3),
+                 rep("Biochemistry",1)))
+```
+
+We construct a correlation matrix for the KS group:
+
+```{r}
+cor_df_KS <- CLIN_df_M_KS %>% 
+  filter(!(Algorithm %in% c("Body Mass Index", "Body Fat %", "HDL Cholesterol", "Waist:Hip Ratio")),
+           group == "KS") %>% 
+  select(-c(id, group, unique_id, Group, Karyotype, Treatment, Age)) %>%
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_KS <- cor_df_KS[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars, "cAge")) %>% 
+    select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_KS <- cor_df_KS[[3]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars, "cAge")) %>% 
+  select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+order_cor_KS <- unique((r_KS %>%  
+                  filter(algorithms == "cAge") %>% 
+                  arrange(value))$name )
+```
+
+We construct a correlation matrix for the male group:
+
+```{r}
+cor_df_M <- CLIN_df_M_KS %>% 
+  filter(!(Algorithm %in% c("Body Mass Index", "Body Fat %", "HDL Cholesterol", "Waist:Hip Ratio")),
+           group == "Male") %>% 
+  select(-c(id, group, unique_id, Group, Karyotype, Treatment, Age)) %>%
+  pivot_wider(names_from = Algorithm, values_from = value) %>% 
+  as.data.frame() %>% 
+  as.matrix() %>%
+  Hmisc::rcorr()
+
+r_M <- cor_df_M[[1]] %>% 
+    as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars, "cAge")) %>% 
+  select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+
+p_M <- cor_df_M[[3]] %>% 
+  as.data.frame() %>% 
+    filter(row.names(.) %in% c(vars, "cAge")) %>% 
+  select(traits_KS_df$traits) %>% 
+    mutate(algorithms = rownames(.)) %>% 
+    pivot_longer(-algorithms)
+```
+
+```{r}
+cor_r_p_KScohort <- merge(
+  rbind(
+  r_KS %>% mutate(p = p_KS$value,
+                  p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "KS"),
+  
+  r_M %>% mutate(p = p_M$value,
+                 p_ = case_when(p < 0.05 ~ "*" , .default = "")) %>% 
+    mutate(group = "Male")),
+  traits_KS_df,
+  by.x = "name", by.y = "traits")
+  
+cor_r_p_KScohort %>% 
+ggplot(aes(factor(name, levels = order_cor_KS),
+           factor(algorithms, levels = c(vars)),
+           fill = value)) + 
+  geom_tile() + 
+  geom_text(aes(label = ifelse(p < 0.001, "<0.001",round(p, digits = 3)), color = p_), size = 1.5) + 
+  scale_color_manual(values = c("grey","black")) + 
+  facet_grid(rows = vars(factor(group, levels = c("KS","Male"))),
+             cols = vars(trait_groups),
+             scales = "free",
+             space = "free") +
+  theme_bw() +
+  scale_fill_gradient2(mid = "white", high = col[4], low = col[3]) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
+        legend.position = "right") +
+  labs(x = "", y = "", title = "") -> cor_p_KS
+cor_p_KS
+
+```
+
+```{r}
+ggarrange(cor_p_TS,
+          cor_p_KS,
+          ncol = 2, nrow = 1,
+          labels = c("A","B"),
+          widths = c(1.75,1.25)) -> S1
+S1
+
+ggsave(S1, file = paste0(path_plots, "SupF1.pdf"),
+                       width=12,
+                       height = 12)
+```
+
+## Table 1
+
+```{r}
+
+# Is there a difference in cAge? 
+emmeans(lm(cAge ~ group, data=df %>% filter(cohort == "TS cohort")), 
+  pairwise ~ group)
+
+emmeans(lm(cAge ~ group, data=df %>% filter(cohort == "KS cohort")), 
+  pairwise ~ group)
+
+t.test(cAge ~ group, data=df %>% filter(cohort == "TS cohort"))
+
+sd((df %>% filter(group == "Male"))$cAge)
+mean((df %>% filter(group == "TS"))$cAge)
+```
+
+```{r}
+# In this section, replace the first term with whatever you are investigating 
+
+# ageAcc
+emmeans(lm(ageAcc ~ group, data = acc_df_mean %>% filter(cohort == "TS cohort")), pairwise ~ group)
+
+((emmeans(lm(ageAcc.BLUP ~ group, data = df %>% filter(cohort == "TS cohort")), pairwise ~ group))$contrast %>% as.data.frame())$p.value
+
+# ageAcc2
+emmeans(lm(ageAcc2 ~ group, data = acc_df_mean %>% filter(cohort == "TS cohort")), pairwise ~ group)
+
+((emmeans(lm(ageAcc2.BLUP ~ group, data = df %>% filter(cohort == "TS cohort")), pairwise ~ group))$contrast %>% as.data.frame())$p.value
+
+
+# ageAcc3
+emmeans(lm(ageAcc3 ~ group, data = acc_df_mean %>% filter(cohort == "TS cohort")), pairwise ~ group)
+
+((emmeans(lm(ageAcc3.BLUP ~ group, data = df %>% filter(cohort == "TS cohort")), pairwise ~ group))$contrast %>% as.data.frame())$p.value
+
+
+```
+
+```{r}
+# ageAcc
+emmeans(lm(ageAcc ~ group, data = acc_df_mean %>% filter(cohort == "KS cohort")), pairwise ~ group)
+
+((emmeans(lm(ageAcc.BLUP ~ group, data = df %>% filter(cohort == "KS cohort")), pairwise ~ group))$contrast %>% as.data.frame())$p.value
+
+# ageAcc2
+emmeans(lm(ageAcc2 ~ group, data = acc_df_mean %>% filter(cohort == "KS cohort")), pairwise ~ group)
+
+((emmeans(lm(ageAcc2.BLUP ~ group, data = df %>% filter(cohort == "KS cohort")), pairwise ~ group))$contrast %>% as.data.frame())$p.value
+
+# ageAcc3
+emmeans(lm(ageAcc3 ~ group, data = acc_df_mean %>% filter(cohort == "KS cohort")), pairwise ~ group)
+
+((emmeans(lm(ageAcc3.BLUP ~ group, data = df %>% filter(cohort == "KS cohort")), pairwise ~ group))$contrast %>% as.data.frame())$p.value
+
+```
+
+```{r}
+
+emmeans(lm(DNAmPhenoAge ~ group,  data = pheno_df %>% filter(cohort == "TS cohort") ), pairwise ~ group)
+emmeans(lm(DNAmPhenoAge ~ cAge + group,  data = pheno_df %>% filter(cohort == "TS cohort") ), pairwise ~ group)
+
+emmeans(lm(DNAmPhenoAge ~ group,  data = pheno_df %>% filter(cohort == "KS cohort") ), pairwise ~ group)
+emmeans(lm(DNAmPhenoAge ~ cAge + group,  data = pheno_df %>% filter(cohort == "KS cohort") ), pairwise ~ group)
+
+emmeans(lm(DNAmGrimAge ~ group,  data = grim_df %>% filter(cohort == "TS cohort") ), pairwise ~ group)
+emmeans(lm(DNAmGrimAge ~ cAge + group,  data = grim_df %>% filter(cohort == "TS cohort") ), pairwise ~ group)
+
+emmeans(lm(DNAmGrimAge ~ group,  data = grim_df %>% filter(cohort == "KS cohort") ), pairwise ~ group)
+emmeans(lm(DNAmGrimAge ~ cAge + group,  data = grim_df %>% filter(cohort == "KS cohort") ), pairwise ~ group)
+
+emmeans(lm(TL ~ group,  data = TL_df %>% filter(cohort == "TS cohort") ), pairwise ~ group)
+emmeans(lm(TL ~ cAge + group,  data = TL_df %>% filter(cohort == "TS cohort") ), pairwise ~ group)
+
+emmeans(lm(TL ~ group,  data = TL_df %>% filter(cohort == "KS cohort") ), pairwise ~ group)
+emmeans(lm(TL ~ cAge + group,  data = TL_df %>% filter(cohort == "KS cohort") ), pairwise ~ group)
+
+emmeans(lm(DunedinPACE ~ group, data = pace_df %>% filter(cohort == "TS cohort") ), pairwise ~ group)
+emmeans(lm(DunedinPACE ~ group, data = pace_df %>% filter(cohort == "KS cohort") ), pairwise ~ group)
+
+```
+
+## Table 2
+
+```{r}
+
+summary(lm(DNAmAge ~ cAge*group, 
+           data = DNAmAge_mean_TS))
+
+summary(lm(DNAmAge ~ cAge*group, 
+           data = DNAmAge_mean_KS))
+
+summary(lm(BLUP ~ cAge*group, 
+           data = pheno_df %>% 
+  filter(cohort == "TS cohort") ))
+
+summary(lm(BLUP ~ cAge*group, 
+           data = pheno_df %>% 
+  filter(cohort == "KS cohort") ))
+
+summary(lm(DNAmPhenoAge ~ cAge*group, 
+           data = pheno_df %>% 
+  filter(cohort == "TS cohort") ))
+
+summary(lm(DNAmPhenoAge ~ cAge*factor(group, levels = c("Male","KS")), 
+           data = pheno_df %>% 
+  filter(cohort == "KS cohort") ))
+
+summary(lm(DNAmGrimAge ~ cAge*factor(group, levels = c("Female","TS")), 
+           data = grim_df %>% 
+  filter(cohort == "TS cohort") ))
+
+summary(lm(DNAmGrimAge ~ cAge*factor(group, levels = c("Male","KS")), 
+           data = grim_df %>% 
+  filter(cohort == "KS cohort") ))
+
+summary(lm(TL ~ cAge*group, 
+           data = TL_df %>% 
+  filter(cohort == "TS cohort") ))
+
+summary(lm(TL ~ cAge*factor(group, levels = c("Male", "KS")), 
+           data = TL_df %>% 
+  filter(cohort == "KS cohort") ))
+
+summary(lm(DunedinPACE ~ cAge*factor(group, levels = c("Female", "TS")), 
+           data = pace_df %>% filter(cohort == "TS cohort")))
+
+summary(lm(DunedinPACE ~ cAge*factor(group, levels = c("Male","KS")), 
+           data = pace_df %>% filter(cohort == "KS cohort")))
+```
+
+## Table S1
+
+```{r}
+t.test(`Weight (kg)` ~ group, data=CLIN)
+round(range(na.omit(CLIN %>% filter(group == "TS") %>% select(`HbA1c (mmol/mol)`))),2)
+round(range(na.omit(CLIN %>% filter(group == "Female") %>% select(`HbA1c (mmol/mol)`))),2)
+
+
+t.test(`hemoglobin` ~ Group, data=CLIN_KS)
+range(na.omit(CLIN_KS %>% filter(Group == "KS") %>% select(hemoglobin)))
+range(na.omit(CLIN_KS %>% filter(Group == "Male") %>% select(hemoglobin)))
+
+```
